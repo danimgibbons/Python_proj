@@ -1,0 +1,10 @@
+name: skater-stimulus-pipeline
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - ffmpeg
+  - numpy
+  - pillow
+  - opencv
+  - scipy
