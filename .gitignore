@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Local video data and generated outputs
+Vids/input/
+Vids/output/
+*.mp4
+*.mov
+*.m4v
+
+# Generated masks and rendered frames
+masks/
+frame_*.png
+
+# Local environment folders
+.venv/
+env/
+venv/
