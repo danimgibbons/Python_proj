@@ -17,21 +17,18 @@ Vids/input/
     camera1/
       raw.mp4
       first_frame.txt
-      clean_frame.png            optional; used by clean_bg
       background_mask.png        optional; used by clean_bg
-      empty_frame.png            optional; used by masks
+      empty_frame.png            optional; used by masks and/or clean_bg
       overlay_mask.png           optional; used by masks
     camera2/
       raw.mp4
       first_frame.txt
-      clean_frame.png
       background_mask.png
       empty_frame.png
       overlay_mask.png
     camera3/
       raw.mp4
       first_frame.txt
-      clean_frame.png
       background_mask.png
       empty_frame.png
       overlay_mask.png
