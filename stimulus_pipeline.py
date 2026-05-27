@@ -286,7 +286,7 @@ def clean_background(args: argparse.Namespace) -> None:
     require_tool("ffprobe")
 
     for camera_input_dir in camera_dirs(args.input_dir):
-        clean_frame_path = camera_input_dir / "clean_frame.png"
+        clean_frame_path = camera_input_dir / "empty_frame.png"
         background_mask_path = camera_input_dir / "background_mask.png"
         if not clean_frame_path.exists() or not background_mask_path.exists():
             print(f"Skipping {camera_input_dir.name}: no clean_frame.png/background_mask.png")
