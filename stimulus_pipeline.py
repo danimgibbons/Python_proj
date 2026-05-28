@@ -10,6 +10,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 import shutil
 import subprocess
@@ -26,6 +27,96 @@ DEFAULT_COLOR_MAP = {
     (0, 0, 100): ((0, 0, 255), 0.4),
     (0, 0, 0): ((0, 255, 255), 0.4),
 }
+DEFAULT_INPUT_DIR = Path("Vids/input")
+DEFAULT_OUTPUT_DIR = Path("Vids/output")
+DEFAULT_CONFIG_PATH = Path("pipeline_config.json")
+CONFIG_TEMPLATE = {
+    "data_root": "/path/to/mounted/secure/server/skater-data",
+    "input_dir": "input",
+    "output_dir": "output",
+}
+
+
+def resolve_data_path(path: Path, data_root: Path | None) -> Path:
+    """Resolve a configured data path, optionally relative to a shared data root."""
+    return path if path.is_absolute() or data_root is None else data_root / path
+
+
+def load_path_config(path: Path | None) -> dict[str, str]:
+    """Read optional local path configuration from JSON."""
+    if path is None:
+        return {}
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        config = json.load(f)
+    if not isinstance(config, dict):
+        raise ValueError(f"Config file must contain a JSON object: {path}")
+    allowed_keys = {"data_root", "input_dir", "output_dir"}
+    unknown_keys = sorted(set(config) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown config key(s) in {path}: {', '.join(unknown_keys)}. "
+            f"Allowed keys: {', '.join(sorted(allowed_keys))}."
+        )
+    return {key: str(value) for key, value in config.items() if value not in (None, "")}
+
+
+def write_config_template(path: Path) -> None:
+    """Create a local path configuration template."""
+    if path.exists():
+        raise FileExistsError(f"Config file already exists: {path}")
+    path.write_text(json.dumps(CONFIG_TEMPLATE, indent=2) + "\n", encoding="utf-8")
+
+
+def configure_data_paths(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Apply defaults, config file values, environment overrides, and CLI paths."""
+    config_path = args.config
+    if config_path is None:
+        env_config = os.environ.get("SKATER_PIPELINE_CONFIG")
+        config_path = Path(env_config) if env_config else DEFAULT_CONFIG_PATH
+
+    if args.write_config:
+        write_config_template(args.write_config)
+        print(f"Wrote config template to: {args.write_config}")
+        raise SystemExit(0)
+
+    config = load_path_config(config_path)
+    data_root_value = (
+        args.data_root
+        or os.environ.get("SKATER_DATA_ROOT")
+        or config.get("data_root")
+    )
+    data_root = Path(data_root_value).expanduser() if data_root_value else None
+
+    input_value = (
+        args.input_dir
+        or os.environ.get("SKATER_INPUT_DIR")
+        or config.get("input_dir")
+        or DEFAULT_INPUT_DIR
+    )
+    output_value = (
+        args.output_dir
+        or os.environ.get("SKATER_OUTPUT_DIR")
+        or config.get("output_dir")
+        or DEFAULT_OUTPUT_DIR
+    )
+
+    args.config = config_path
+    args.data_root = data_root
+    args.input_dir = resolve_data_path(Path(input_value).expanduser(), data_root)
+    args.output_dir = resolve_data_path(Path(output_value).expanduser(), data_root)
+
+    if args.input_dir == args.output_dir:
+        parser.error("--input-dir and --output-dir must be different paths")
+
+
+def show_configured_paths(args: argparse.Namespace) -> None:
+    """Print the effective data paths after config/env/CLI resolution."""
+    print(f"Config file: {args.config}")
+    print(f"Data root: {args.data_root or '(none)'}")
+    print(f"Input dir: {args.input_dir}")
+    print(f"Output dir: {args.output_dir}")
 
 
 def require_tool(name: str) -> None:
@@ -196,12 +287,27 @@ def get_video_duration(path: Path) -> float:
     return float(json.loads(out)["streams"][0]["duration"])
 
 
+def camera_output_root(args: argparse.Namespace, camera_name: str) -> Path:
+    """Return the root output folder for one camera."""
+    return args.output_dir / camera_name
+
+
+def big_chunk_dir(args: argparse.Namespace, camera_name: str) -> Path:
+    """Return the folder for synchronized big chunks from one camera."""
+    return camera_output_root(args, camera_name) / "big"
+
+
+def small_chunk_dir(args: argparse.Namespace, camera_name: str) -> Path:
+    """Return the folder for small chunks from one camera."""
+    return camera_output_root(args, camera_name) / "small"
+
+
 def cut_big_chunks(args: argparse.Namespace) -> None:
     """Cut long raw camera recordings into synchronized big chunks."""
     require_tool("ffmpeg")
     for camera_plan in synced_chunk_plan(args.input_dir, args.fps, args.lead_in_seconds):
         for item in camera_plan:
-            camera_dir = args.output_dir / str(item["camera_name"])
+            camera_dir = big_chunk_dir(args, str(item["camera_name"]))
             output_file = camera_dir / f"big{item['chunk']}.mp4"
             output_file.parent.mkdir(parents=True, exist_ok=True)
             cmd = [
@@ -231,7 +337,7 @@ def cut_big_chunks(args: argparse.Namespace) -> None:
 def cut_small_chunks(args: argparse.Namespace) -> None:
     """Split big chunks into smaller clips for inspection and later editing."""
     require_tool("ffmpeg")
-    big_chunks = sorted(args.output_dir.glob("*/big*.mp4"))
+    big_chunks = sorted(args.output_dir.glob("*/big/big*.mp4"))
     if not big_chunks:
         raise FileNotFoundError(f"No big chunks found under: {args.output_dir}")
 
@@ -245,14 +351,15 @@ def cut_small_chunks(args: argparse.Namespace) -> None:
     print(f"Small chunk duration: {small_duration:.2f}s")
 
     for big_chunk_file in big_chunks:
+        camera_name = big_chunk_file.parent.parent.name
+        output_dir = small_chunk_dir(args, camera_name)
+        output_dir.mkdir(parents=True, exist_ok=True)
         duration = get_video_duration(big_chunk_file)
         num_chunks = int(math.floor(duration / small_duration))
         for index in range(num_chunks):
             start = index * small_duration
             end = start + small_duration
-            output_file = big_chunk_file.with_name(
-                f"{big_chunk_file.stem}_small{index + 1}.mp4"
-            )
+            output_file = output_dir / f"{big_chunk_file.stem}_small{index + 1}.mp4"
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -292,14 +399,15 @@ def clean_background(args: argparse.Namespace) -> None:
             print(f"Skipping {camera_input_dir.name}: no clean_frame.png/background_mask.png")
             continue
 
-        camera_output_dir = args.output_dir / camera_input_dir.name
+        camera_output_dir = camera_output_root(args, camera_input_dir.name)
+        small_dir = small_chunk_dir(args, camera_input_dir.name)
         cleaned_dir = camera_output_dir / "cleaned"
         cleaned_dir.mkdir(parents=True, exist_ok=True)
         clean = np.asarray(Image.open(clean_frame_path).convert("RGB"), dtype=np.float32)
         mask = np.asarray(Image.open(background_mask_path).convert("L"), dtype=np.float32) / 255.0
         mask = mask[..., None]
 
-        for video_path in sorted(camera_output_dir.glob(args.chunk_pattern)):
+        for video_path in sorted(small_dir.glob(args.chunk_pattern)):
             output_path = cleaned_dir / f"{video_path.stem}_cleaned.mp4"
             width, height, fps = get_video_info(video_path)
             if clean.shape[:2] != (height, width):
@@ -374,13 +482,13 @@ def clean_background(args: argparse.Namespace) -> None:
 
 def mask_source_videos(args: argparse.Namespace, camera_name: str) -> list[Path]:
     """Return videos to use as inputs for mask generation."""
-    camera_output_dir = args.output_dir / camera_name
+    camera_output_dir = camera_output_root(args, camera_name)
     cleaned_dir = camera_output_dir / "cleaned"
-    if cleaned_dir.exists():
-        videos = sorted(cleaned_dir.glob(args.chunk_pattern))
-        if videos:
-            return videos
-    return sorted(camera_output_dir.glob(args.chunk_pattern))
+    videos = []
+    for small_video in sorted(small_chunk_dir(args, camera_name).glob(args.chunk_pattern)):
+        cleaned_video = cleaned_dir / f"{small_video.stem}_cleaned.mp4"
+        videos.append(cleaned_video if cleaned_video.exists() else small_video)
+    return videos
 
 
 def generate_frame_masks(args: argparse.Namespace) -> None:
@@ -388,6 +496,18 @@ def generate_frame_masks(args: argparse.Namespace) -> None:
     import cv2
     import numpy as np
 
+    def align_image_to_frame(
+        image: np.ndarray,
+        frame: np.ndarray,
+        interpolation: int,
+    ) -> np.ndarray:
+        """Resize an image to match the current video frame when needed."""
+        frame_h, frame_w = frame.shape[:2]
+        if image.shape[:2] == (frame_h, frame_w):
+            return image
+        return cv2.resize(image, (frame_w, frame_h), interpolation=interpolation)
+
+    processed_videos = 0
     for camera_input_dir in camera_dirs(args.input_dir):
         empty_frame_path = camera_input_dir / "empty_frame.png"
         overlay_mask_path = camera_input_dir / "overlay_mask.png"
@@ -395,27 +515,47 @@ def generate_frame_masks(args: argparse.Namespace) -> None:
             print(f"Skipping {camera_input_dir.name}: no empty_frame.png/overlay_mask.png")
             continue
 
-        ref = cv2.imread(str(empty_frame_path), cv2.IMREAD_UNCHANGED)
+        ref = cv2.imread(str(empty_frame_path), cv2.IMREAD_COLOR)
         background_mask = cv2.imread(str(overlay_mask_path), cv2.IMREAD_UNCHANGED)
         if ref is None:
             raise RuntimeError(f"Cannot read empty frame: {empty_frame_path}")
         if background_mask is None:
             raise RuntimeError(f"Cannot read overlay mask: {overlay_mask_path}")
+        if background_mask.ndim == 2:
+            background_mask = cv2.cvtColor(background_mask, cv2.COLOR_GRAY2BGRA)
+        elif background_mask.shape[2] == 3:
+            background_mask = cv2.cvtColor(background_mask, cv2.COLOR_BGR2BGRA)
 
-        for video_path in mask_source_videos(args, camera_input_dir.name):
+        source_videos = mask_source_videos(args, camera_input_dir.name)
+        if not source_videos:
+            print(
+                f"Skipping {camera_input_dir.name}: no videos matching "
+                f"{args.chunk_pattern!r} in {small_chunk_dir(args, camera_input_dir.name)}"
+            )
+            continue
+
+        for video_path in source_videos:
             output_dir = args.output_dir / "masks" / camera_input_dir.name / video_path.stem
             output_dir.mkdir(parents=True, exist_ok=True)
             cap = cv2.VideoCapture(str(video_path))
             if not cap.isOpened():
                 raise RuntimeError(f"Cannot open video: {video_path}")
 
+            video_ref = None
+            video_background_mask = None
             frame_idx = 0
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                diff = cv2.absdiff(frame.astype("float32"), ref.astype("float32"))
+                if video_ref is None:
+                    video_ref = align_image_to_frame(ref, frame, cv2.INTER_LINEAR)
+                    video_background_mask = align_image_to_frame(
+                        background_mask, frame, cv2.INTER_NEAREST
+                    )
+
+                diff = cv2.absdiff(frame.astype("float32"), video_ref.astype("float32"))
                 diff = cv2.GaussianBlur(diff, tuple(args.blur_kernel), 0)
                 diff_gray = cv2.cvtColor(diff.astype(np.uint8), cv2.COLOR_BGR2GRAY)
                 _, skater_mask = cv2.threshold(
@@ -433,13 +573,21 @@ def generate_frame_masks(args: argparse.Namespace) -> None:
                     largest_blob[labels == largest_label] = 255
                     skater_mask = largest_blob
 
-                final_mask = background_mask.copy()
-                final_mask[skater_mask == 255] = [0, 0, 0, 0]
+                final_mask = video_background_mask.copy()
+                final_mask[skater_mask == 255] = [255, 255, 255, 255]
                 cv2.imwrite(str(output_dir / f"frame_{frame_idx:06d}.png"), final_mask)
                 frame_idx += 1
 
             cap.release()
             print(f"Saved {frame_idx} masks to: {output_dir}")
+            processed_videos += 1
+
+    if processed_videos == 0:
+        raise FileNotFoundError(
+            "No mask inputs were processed. Check that --input-dir contains camera "
+            "empty_frame.png/overlay_mask.png files and that --output-dir contains "
+            f"small chunks under camera*/small/ matching {args.chunk_pattern!r}."
+        )
 
 
 def read_color_map(input_dir: Path) -> dict[tuple[int, int, int], tuple[tuple[int, int, int], float]]:
@@ -465,7 +613,7 @@ def source_video_for_masks(args: argparse.Namespace, camera_name: str, stem: str
     """Find the video that corresponds to one mask-frame folder."""
     candidates = [
         args.output_dir / camera_name / "cleaned" / f"{stem}.mp4",
-        args.output_dir / camera_name / f"{stem}.mp4",
+        small_chunk_dir(args, camera_name) / f"{stem}.mp4",
     ]
     for path in candidates:
         if path.exists():
@@ -587,7 +735,7 @@ def camera_switch_source(args: argparse.Namespace, camera_name: str) -> Path:
         args.output_dir / camera_name / "overlaid" / f"{base}_cleaned_overlay.mp4",
         args.output_dir / camera_name / "overlaid" / f"{base}_overlay.mp4",
         args.output_dir / camera_name / "cleaned" / f"{base}_cleaned.mp4",
-        args.output_dir / camera_name / f"{base}.mp4",
+        small_chunk_dir(args, camera_name) / f"{base}.mp4",
     ]
     for path in candidates:
         if path.exists():
@@ -695,8 +843,44 @@ def parse_kernel(value: str) -> list[int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare MEG video stimuli.")
-    parser.add_argument("--input-dir", type=Path, default=Path("Vids/input"))
-    parser.add_argument("--output-dir", type=Path, default=Path("Vids/output"))
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help=(
+            "Optional JSON config with data_root, input_dir, and output_dir. "
+            "Defaults to SKATER_PIPELINE_CONFIG or pipeline_config.json when present."
+        ),
+    )
+    parser.add_argument(
+        "--write-config",
+        type=Path,
+        default=None,
+        help="Write a starter path config JSON file and exit.",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=None,
+        help="Base folder for relative input/output paths, such as a mounted server folder.",
+    )
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=None,
+        help="Input folder. Relative paths are resolved under --data-root when set.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Output folder. Relative paths are resolved under --data-root when set.",
+    )
+    parser.add_argument(
+        "--show-paths",
+        action="store_true",
+        help="Print the effective config/input/output paths and exit.",
+    )
     parser.add_argument(
         "--steps",
         nargs="+",
@@ -722,6 +906,10 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    configure_data_paths(args, parser)
+    if args.show_paths:
+        show_configured_paths(args)
+        raise SystemExit(0)
 
     steps = args.steps or STAGES
     if "all" in steps:

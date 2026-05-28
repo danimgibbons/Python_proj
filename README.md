@@ -47,6 +47,50 @@ chunk,start,end
 `first_frame.txt` contains the first synchronized frame number for that camera.
 The first camera is treated as the timing reference.
 
+## Keeping Data Outside the Repo
+
+The repository is set up so large input videos and generated outputs can live
+outside the git checkout, for example on a mounted secure server folder.
+
+The easiest setup is to create a local config file:
+
+```bash
+python stimulus_pipeline.py --write-config pipeline_config.json
+```
+
+Then edit `pipeline_config.json`:
+
+```json
+{
+  "data_root": "/Volumes/secure-server/skater-data",
+  "input_dir": "input",
+  "output_dir": "output"
+}
+```
+
+With that file in place, short commands such as this automatically use:
+`/Volumes/secure-server/skater-data/input` and
+`/Volumes/secure-server/skater-data/output`.
+
+```bash
+python stimulus_pipeline.py --show-paths
+python stimulus_pipeline.py --steps preprocess
+```
+
+`pipeline_config.json` is ignored by git so each machine can point at its own
+local mount path. `pipeline_config.example.json` is committed as a template.
+
+Path settings are applied in this order, from lowest to highest priority:
+
+1. Built-in defaults: `Vids/input` and `Vids/output`.
+2. Config file values from `pipeline_config.json`, or from `--config PATH`.
+3. Environment variables: `SKATER_DATA_ROOT`, `SKATER_INPUT_DIR`,
+   `SKATER_OUTPUT_DIR`, and `SKATER_PIPELINE_CONFIG`.
+4. Command-line options: `--data-root`, `--input-dir`, and `--output-dir`.
+
+If `--data-root` or `data_root` is set, relative input/output paths are resolved
+inside that root. Absolute input/output paths are used exactly as written.
+
 ## Environment
 
 Create the Conda environment before running the pipeline:
@@ -54,6 +98,14 @@ Create the Conda environment before running the pipeline:
 ```bash
 conda env create -f environment.yml
 conda activate skater-stimulus-pipeline
+```
+
+After activating the environment, use `python` rather than `python3` so the
+pipeline runs with the Conda interpreter that has packages such as OpenCV
+available. For a one-off command without activating first, use:
+
+```bash
+conda run -n skater-stimulus-pipeline python stimulus_pipeline.py --steps masks
 ```
 
 ## Workflow
@@ -71,35 +123,40 @@ conda activate skater-stimulus-pipeline
 Run one stage at a time:
 
 ```bash
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps cut_big
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps cut_small
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps clean_bg
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps masks
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps overlays
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps camera_cut
+python stimulus_pipeline.py --steps cut_big
+python stimulus_pipeline.py --steps cut_small
+python stimulus_pipeline.py --steps clean_bg
+python stimulus_pipeline.py --steps masks
+python stimulus_pipeline.py --steps overlays
+python stimulus_pipeline.py --steps camera_cut
 ```
 
 Run both chunking stages:
 
 ```bash
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps preprocess
+python stimulus_pipeline.py --steps preprocess
 ```
 
 Run the full workflow:
 
 ```bash
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps all
+python stimulus_pipeline.py --steps all
 ```
 
 Preview FFmpeg commands for cutting and switching without writing videos:
 
 ```bash
-python3 stimulus_pipeline.py --input-dir Vids/input --output-dir Vids/output --steps cut_big --dry-run
+python stimulus_pipeline.py --steps cut_big --dry-run
 ```
 
 ## Useful Options
 
 - `--fps 50`: frame rate used for timecode/frame conversion.
+- `--config pipeline_config.json`: use a specific local path config file.
+- `--data-root /Volumes/secure-server/skater-data`: base folder for relative
+  input/output paths.
+- `--input-dir input --output-dir output`: override the configured folders.
+- `--show-paths`: print the effective input/output paths and exit.
 - `--lead-in-seconds 4`: seconds added to each start time before cutting.
 - `--small-duration 150`: fixed small-chunk duration in seconds.
 - `--small-duration-min 120 --small-duration-max 180`: search range used when
@@ -117,8 +174,10 @@ By default, outputs are written under `Vids/output/`:
 ```text
 Vids/output/
   camera1/
-    big1.mp4
-    big1_small1.mp4
+    big/
+      big1.mp4
+    small/
+      big1_small1.mp4
     cleaned/
     overlaid/
   camera2/
